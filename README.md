@@ -41,7 +41,7 @@ Install File/            # = BASE (mcp_server.py 기준 상위 폴더)
 
 | MCP 도구 | 대상 | 주요 인자 | 내부 호출 |
 |---|---|---|---|
-| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `dbname`, `resource_id`, `hours` | `pg_diagnose.py --aad --format json` |
+| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `user`, `dbname`, `resource_id`, `hours` | `pg_diagnose.py --aad --format json` |
 | `diagnose_aks` | AKS 클러스터 | `namespace`, `context`, `all_namespaces`, `prometheus_url`, `appinsights_id` | `aks_diagnose.py --format json` |
 | `diagnose_adx` | Azure Data Explorer(Kusto) | `cluster`, `database`, `resource_id`, `region`, `hours` | `adx_diagnose.py --auth default --format json` |
 | `diagnose_eventhub` | Azure Event Hubs | `resource_id`, `event_hub`, `region`, `window_minutes` | `eh_diagnose.py --azure-auth --eh-auth entra --format json` |
@@ -157,6 +157,34 @@ az deployment group create -g <rg> `
 > `externalIngress=true`(PoC 기본)는 MCP 엔드포인트를 공개한다. 운영에서는 `externalIngress=false`(내부)로
 > 두고 **APIM/Private Endpoint 뒤에 인증**을 두거나, 최소한 IP 제한을 건다. 진단 출력은 `_clean`으로
 > secret/PII/prompt-injection을 필터링하지만, 엔드포인트 자체 접근 제어는 별도로 확보해야 한다.
+
+### 4.1 엔드포인트 접근 제어 (옵션, 기본값=기존 동작 유지)
+
+`main.bicep`에 아래 파라미터가 추가되어 있다. **기본값은 모두 기존 동작과 동일**(인증 없음·IP 무제한)하며,
+필요할 때만 켜서 쓴다. 켜기 전 `externalIngress=false` + Private Endpoint 조합도 함께 검토할 것.
+
+| 파라미터 | 기본값 | 켰을 때 동작 |
+|---|---|---|
+| `enableEntraAuth` | `false` | ACA Easy Auth(플랫폼 레벨)로 `/mcp` 앞단에 AAD 인증을 걸어, 유효 토큰이 없는 요청은 **401**로 차단. `mcp_server.py` 코드 변경 없음. |
+| `entraAuthClientId` | `''` | `enableEntraAuth=true`일 때 필수 — 이 MCP API를 나타내는 App Registration의 클라이언트 ID. |
+| `entraAuthTenantId` | 배포 구독의 테넌트 | 토큰 발급 테넌트(멀티테넌트 앱이 아니면 기본값 그대로 사용). |
+| `allowedIpRanges` | `[]` (무제한) | 값을 채우면(`['203.0.113.0/24']` 등) ingress에 IP 허용목록을 적용, 목록 외 트래픽은 자동 차단. |
+
+```bicepparam
+// main.bicepparam 예시 — 운영 전환 시
+param enableEntraAuth = true
+param entraAuthClientId = '<mcp-api-app-registration-client-id>'
+param allowedIpRanges = ['<SRE-Agent-egress-CIDR>']
+```
+
+> [!NOTE]
+> `enableEntraAuth=true`로 배포한 뒤에는 SRE Agent MCP 커넥터 쪽에서도 `entraAuthClientId`(또는 그 API의
+> `api://<clientId>` 스코프)에 대한 토큰을 획득해 `Authorization: Bearer <token>`으로 호출하도록 커넥터
+> 설정을 맞춰야 한다. 그렇지 않으면 정상 호출도 401로 막힌다 — 먼저 비운영 환경에서 검증 후 적용 권장.
+
+### 4.2 헬스체크
+`mcp_server.py`는 설치된 `mcp` SDK가 `custom_route`를 지원하면 `GET /health`(인증 불필요, `{"status":"ok"}`)를
+추가로 노출한다. 미지원 버전이면 조용히 건너뛰며 `/mcp` 등 기존 동작에는 영향이 없다.
 
 ---
 

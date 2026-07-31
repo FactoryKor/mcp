@@ -7,7 +7,7 @@ mcp
 # private 리포라면 로컬은 `gh auth setup-git`으로 인증된 git 자격증명을 그대로 쓰고,
 # CI(Docker 빌드)에서는 mcp/Dockerfile의 GH_PAT 시크릿을 통해 인증한다.
 pg-diagnose @ git+https://github.com/FactoryKor/pg.git@v1.0.0
-aks-diagnose @ git+https://github.com/FactoryKor/AKS-Diag.git@v1.0.0
+aks-diagnose @ git+https://github.com/FactoryKor/aks.git@v1.0.0
 adx-diagnose @ git+https://github.com/FactoryKor/adx.git@v1.0.0
 eh-diagnose @ git+https://github.com/FactoryKor/eh.git@v1.0.0
 agw-diagnose @ git+https://github.com/FactoryKor/agw.git@v1.0.0

@@ -35,7 +35,7 @@ Install File/            # = BASE (parent folder of mcp_server.py)
 
 | MCP tool | Target | Key arguments | Internal invocation |
 |---|---|---|---|
-| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `dbname`, `resource_id`, `hours` | `pg_diagnose.py --aad --format json` |
+| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `user`, `dbname`, `resource_id`, `hours` | `pg_diagnose.py --aad --format json` |
 | `diagnose_aks` | AKS cluster | `namespace`, `context`, `all_namespaces`, `prometheus_url`, `appinsights_id` | `aks_diagnose.py --format json` |
 | `diagnose_adx` | Azure Data Explorer (Kusto) | `cluster`, `database`, `resource_id`, `region`, `hours` | `adx_diagnose.py --auth default --format json` |
 | `diagnose_eventhub` | Azure Event Hubs | `resource_id`, `event_hub`, `region`, `window_minutes` | `eh_diagnose.py --azure-auth --eh-auth entra --format json` |
