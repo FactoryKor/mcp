@@ -9,11 +9,18 @@ COPY . ./mcp/
 # ACR: `az acr build --secret-build-arg GH_PAT=<token>` 사용 시 빌드 로그/이미지에 값이 노출되지 않는다.
 # (일반 --build-arg는 이미지 히스토리에 남을 수 있으므로 사용하지 말 것)
 ARG GH_PAT=""
-RUN if [ -n "$GH_PAT" ]; then \
+# git은 requirements.txt의 git+https 설치에만 필요하므로 설치 후 제거한다(python:3.12-slim에는 없음).
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    if [ -n "$GH_PAT" ]; then \
       git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"; \
-    fi \
-    && pip install --no-cache-dir -r mcp/requirements.txt \
-    && git config --global --unset "url.https://x-access-token:${GH_PAT}@github.com/.insteadOf" 2>/dev/null || true
+    fi; \
+    pip install --no-cache-dir -r mcp/requirements.txt; \
+    rm -f /root/.gitconfig; \
+    apt-get purge -y --auto-remove git; \
+    rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8000
 CMD ["python", "mcp/mcp_server.py"]
