@@ -10,6 +10,10 @@ ADX_TOOL = "adx-diagnose"
 EH_TOOL  = "eh-diagnose"
 SVCMAP_TOOL = "svcmap-diagnose"
 AGW_TOOL = "agw-diagnose"
+WINDOWS_TOOL = "windows-diagnose"
+LINUX_TOOL = "linux-diagnose"
+MSSQL_TOOL = "mssql-diagnose"
+MYSQL_TOOL = "mysql-diagnose"
 
 mcp = FastMCP("diag-tools", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
 
@@ -32,6 +36,9 @@ NS  = re.compile(r"^[a-z0-9-]{1,63}$")
 CLUSTER = re.compile(r"^https://[A-Za-z0-9.-]+\.kusto\.[A-Za-z0-9.]+/?$", re.IGNORECASE)
 # --prometheus-aad(Entra 토큰) 유출/SSRF 방지: Azure Monitor 관리형 Prometheus 엔드포인트로만 허용
 PROM_URL = re.compile(r"^https://[A-Za-z0-9.-]+\.prometheus\.monitor\.azure\.com(/.*)?$", re.IGNORECASE)
+# Log Analytics workspace GUID / OS 호스트명(컴퓨터명) 검증 (linux/windows os 진단용)
+WORKSPACE_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+COMPUTER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 
 
 def _run(tool: str, cmd: list, timeout: int) -> dict:
@@ -192,6 +199,116 @@ def diagnose_appgateway(resource_id: str = "", region: str = "",
     if not backend_health:
         cmd += ["--no-backend-health"]
     return _run("agw_diagnose", cmd, 300)
+
+@mcp.tool()
+def diagnose_mssql(host: str, user: str, database: str = "master", auth_mode: str = "entra",
+                   resource_id: str = "", region: str = "", hours: int = 24) -> dict:
+    """SQL Server 진단(읽기 전용, 결과 JSON) — 온프레미스/IaaS/Azure SQL Database/
+    Azure SQL Managed Instance 전부 지원(같은 바이너리, EngineEdition으로 자동 감지).
+    host: SQL Server 호스트/FQDN. user: 로그인 이름(Entra UPN 또는 SQL 로그인) — 필수.
+    auth_mode: 'entra'(기본, Entra 토큰) 또는 'sql'(SQL 인증 — 이 경우 컴테이너
+    환경변수 MSSQL_DIAGNOSE_PASSWORD가 미리 설정돼 있어야 하며, MCP를 통해
+    비밀번호를 전달하지 않는다 — DB 계정과 시스템 계정이 분리되어 서비스되는
+    환경에서도 각자 독립적으로 인증할 수 있다). resource_id/region 지정 시(Azure SQL
+    DB/MI인 경우) Azure Monitor 메트릭도 포함한다.
+
+    [자율 발견→재호출 루프] host만으로는 Azure SQL DB/MI의 ARM resource_id를
+    유도할 수 없다. 배포 형태가 Azure로 감지되었는데 resource_id 없이 호출하면
+    결과 JSON의 최상위 `needs_input`에 안내가 채워진다. discovery_hint를 참고해
+    값을 확정한 뒤 재호출하면 채워진다."""
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if auth_mode not in ("entra", "sql"):
+        raise ValueError("invalid auth_mode")
+    if resource_id and not RID.match(resource_id):
+        raise ValueError("invalid resource_id")
+    cmd = [MSSQL_TOOL, "--host", host, "--user", user, "--database", database,
+          "--auth-mode", auth_mode, "--format", "json", "--hours", str(hours)]
+    if resource_id:
+        cmd += ["--resource-id", resource_id]
+    if region:
+        cmd += ["--region", region]
+    return _run("mssql_diagnose", cmd, 180)
+
+@mcp.tool()
+def diagnose_mysql(host: str, user: str, database: str = "", auth_mode: str = "entra",
+                   resource_id: str = "", region: str = "", hours: int = 24) -> dict:
+    """MySQL 진단(읽기 전용, 결과 JSON) — 온프레미스/IaaS/Azure Database for MySQL
+    Flexible Server 전부 지원(같은 바이너리).
+    host: MySQL 호스트/FQDN. user: 로그인 이름(Entra 이름 또는 MySQL 사용자) — 필수.
+    auth_mode: 'entra'(기본, Entra 토큰) 또는 'mysql'(네이티브 인증 — 이 경우
+    컴테이너 환경변수 MYSQL_DIAGNOSE_PASSWORD가 미리 설정돼 있어야 하며, MCP를
+    통해 비밀번호를 전달하지 않는다). resource_id/region 지정 시(Azure DB for
+    MySQL Flexible Server인 경우) Azure Monitor 메트릭도 포함한다.
+
+    [자율 발견→재호출 루프] host가 *.mysql.database.azure.com으로 보이는데
+    resource_id 없이 호출하면 결과 JSON의 최상위 `needs_input`에 안내가 채워진다.
+    discovery_hint를 참고해 값을 확정한 뒤 재호출하면 채워진다."""
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if auth_mode not in ("entra", "mysql"):
+        raise ValueError("invalid auth_mode")
+    if resource_id and not RID.match(resource_id):
+        raise ValueError("invalid resource_id")
+    cmd = [MYSQL_TOOL, "--host", host, "--user", user,
+          "--auth-mode", auth_mode, "--format", "json", "--hours", str(hours)]
+    if database:
+        cmd += ["--database", database]
+    if resource_id:
+        cmd += ["--resource-id", resource_id]
+    if region:
+        cmd += ["--region", region]
+    return _run("mysql_diagnose", cmd, 180)
+
+@mcp.tool()
+def diagnose_windows_os(computer: str, workspace_id: str = "", resource_id: str = "",
+                        hours: int = 24) -> dict:
+    """Windows 서버(Azure VM/Arc) OS 진단(읽기 전용, 결과 JSON).
+    computer: Log Analytics 'Computer' 컬럼 값. workspace_id 미지정 시 CPU/메모리/디스크/
+    이벤트로그/하트비트 조회 생략. resource_id 지정 시 VM 전원 상태/크기/OS 버전(제어 평면) 포함.
+    이미 수집된 Azure Monitor Agent 원격 측정만 읽으며, 서버에 원격 명령을 내리지 않는다.
+
+    [자율 발견→재호출 루프] computer(호스트명)만으로는 연결된 Log Analytics 워크스페이스나
+    VM의 ARM resource_id(제어 평면)를 직접 유도할 수 없다. workspace_id/resource_id 없이
+    호출해 결과 JSON의 최상위 `needs_input`에 해당 parameter 항목이 있으면, 그 안의
+    discovery_hint를 참고해 Resource Graph로 값을 확정한 뒤 재호출하면 해당 섹션까지 채워진다."""
+    if not COMPUTER.match(computer or ""):
+        raise ValueError("invalid computer")
+    if workspace_id and not WORKSPACE_ID.match(workspace_id):
+        raise ValueError("invalid workspace_id")
+    if resource_id and not RID.match(resource_id):
+        raise ValueError("invalid resource_id")
+    cmd = [WINDOWS_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
+    if workspace_id:
+        cmd += ["--workspace-id", workspace_id]
+    if resource_id:
+        cmd += ["--resource-id", resource_id]
+    return _run("windows_diagnose", cmd, 180)
+
+@mcp.tool()
+def diagnose_linux_os(computer: str, workspace_id: str = "", resource_id: str = "",
+                      hours: int = 24) -> dict:
+    """Linux 서버(Azure VM/Arc) OS 진단(읽기 전용, 결과 JSON).
+    computer: Log Analytics 'Computer' 컬럼 값. workspace_id 미지정 시 CPU/메모리/디스크/
+    Syslog/하트비트 조회 생략. resource_id 지정 시 VM 전원 상태/크기/OS 버전(제어 평면) 포함.
+    이미 수집된 Azure Monitor Agent 원격 측정만 읽으며, 서버에 원격 명령을 내리지 않는다.
+
+    [자율 발견→재호출 루프] computer(호스트명)만으로는 연결된 Log Analytics 워크스페이스나
+    VM의 ARM resource_id(제어 평면)를 직접 유도할 수 없다. workspace_id/resource_id 없이
+    호출해 결과 JSON의 최상위 `needs_input`에 해당 parameter 항목이 있으면, 그 안의
+    discovery_hint를 참고해 Resource Graph로 값을 확정한 뒤 재호출하면 해당 섹션까지 채워진다."""
+    if not COMPUTER.match(computer or ""):
+        raise ValueError("invalid computer")
+    if workspace_id and not WORKSPACE_ID.match(workspace_id):
+        raise ValueError("invalid workspace_id")
+    if resource_id and not RID.match(resource_id):
+        raise ValueError("invalid resource_id")
+    cmd = [LINUX_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
+    if workspace_id:
+        cmd += ["--workspace-id", workspace_id]
+    if resource_id:
+        cmd += ["--resource-id", resource_id]
+    return _run("linux_diagnose", cmd, 180)
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")   # 엔드포인트: /mcp
