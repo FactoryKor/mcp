@@ -41,16 +41,18 @@ Install File/            # = BASE (mcp_server.py 기준 상위 폴더)
 
 | MCP 도구 | 대상 | 주요 인자 | 내부 호출 |
 |---|---|---|---|
-| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `user`, `dbname`, `resource_id`, `hours` | `pg_diagnose.py --aad --format json` |
+| `diagnose_postgres` | PostgreSQL Flexible Server | `host`, `user`, `dbname`, `resource_id`, `hours`, `auth_mode`(entra\|password) | `pg_diagnose.py --format json` |
 | `diagnose_aks` | AKS 클러스터 | `namespace`, `context`, `all_namespaces`, `prometheus_url`, `appinsights_id` | `aks_diagnose.py --format json` |
 | `diagnose_adx` | Azure Data Explorer(Kusto) | `cluster`, `database`, `resource_id`, `region`, `hours` | `adx_diagnose.py --auth default --format json` |
 | `diagnose_eventhub` | Azure Event Hubs | `resource_id`, `event_hub`, `region`, `window_minutes` | `eh_diagnose.py --azure-auth --eh-auth entra --format json` |
 | `diagnose_service_map` | 워크로드 서비스 맵 | `appinsights_id`, `workspace_id`, `workload`, `window_minutes` | `svcmap_diagnose.py --format json` |
 | `diagnose_appgateway` | Application Gateway | `resource_id`, `region`, `window_minutes`, `backend_health` | `agw_diagnose.py --azure-auth --format json` |
-| `diagnose_windows_os` | Windows 서버(Azure VM/Arc) | `computer`, `workspace_id`, `resource_id`, `hours` | `windows_diagnose.py --format json` |
-| `diagnose_linux_os` | Linux 서버(Azure VM/Arc) | `computer`, `workspace_id`, `resource_id`, `hours` | `linux_diagnose.py --format json` |
+| `diagnose_windows_os` | Windows 서버(Azure VM/Arc 또는 온프레미스/AWS/GCP) | `source`(azure-monitor\|direct), `computer`/`workspace_id` 또는 `host`/`winrm_user`, `resource_id`, `hours`, `start_time`/`end_time` | `windows_diagnose.py --format json` |
+| `diagnose_linux_os` | Linux 서버(Azure VM/Arc 또는 온프레미스/AWS/GCP) | `source`(azure-monitor\|direct), `computer`/`workspace_id` 또는 `host`/`ssh_user`, `resource_id`, `hours`, `start_time`/`end_time` | `linux_diagnose.py --format json` |
 | `diagnose_mssql` | SQL Server(온프레미스/IaaS/Azure SQL DB/MI) | `host`, `user`, `database`, `auth_mode`, `resource_id`, `region`, `hours` | `mssql_diagnose.py --format json` |
 | `diagnose_mysql` | MySQL(온프레미스/IaaS/Azure DB for MySQL) | `host`, `user`, `database`, `auth_mode`, `resource_id`, `region`, `hours` | `mysql_diagnose.py --format json` |
+| `diagnose_windows_upgrade` | Windows OS/소프트웨어 업그레이드 준비도(온프레미스/IaaS 불문, WinRM 직접 접속) | `host`, `winrm_user`, `skip_patch_check` | `windows_upgrade_diagnose.py --format json` |
+| `diagnose_linux_upgrade` | Linux OS/소프트웨어 업그레이드 준비도(온프레미스/IaaS 불문, SSH 직접 접속) | `host`, `ssh_user` | `linux_upgrade_diagnose.py --format json` |
 
 각 도구는 입력을 검증(`RID`/`NS`/`CLUSTER`/`WORKSPACE_ID`/`COMPUTER` 정규식)한 뒤 `subprocess.run([... , "--format", "json"])`으로
 진단기를 실행하고 `json.loads(stdout)`을 반환합니다. 인자는 셸 문자열이 아닌 **argv 리스트**로 전달합니다.
@@ -81,11 +83,23 @@ python mcp_server.py
   Azure 자격(Managed Identity / `az login` / 환경변수 등)이 준비돼 있어야 합니다.
 - 권한(RBAC)은 각 진단기 README 참고 (예: ADX 메트릭 = 클러스터 `Monitoring Reader`,
   Event Hubs 데이터 평면 = `Azure Event Hubs Data Receiver`).
+- `diagnose_postgres`를 `auth_mode="password"`(네이티브 DB 계정)로 호출하려면, MCP를 구동하는
+  컨테이너/프로세스에 `PGPASSWORD` 환경변수가 미리 설정돼 있어야 합니다 — 비밀번호는 MCP 도구
+  인자로 전달되지 않습니다. `auth_mode="entra"`(기본값)를 쓰면 이 환경변수가 필요 없습니다.
 - `diagnose_mssql`/`diagnose_mysql`을 `auth_mode="sql"`/`"mysql"`(네이티브 DB 계정)로 호출하려면,
   MCP를 구동하는 컨테이너/프로세스에 `MSSQL_DIAGNOSE_PASSWORD`/`MYSQL_DIAGNOSE_PASSWORD`
   환경변수가 미리 설정돼 있어야 합니다 — 비밀번호는 MCP 도구 인자로 전달되지 않습니다
   (CLI와 동일하게 절대 평문 인자로 받지 않는 설계). `auth_mode="entra"`(기본값)를 쓰면
   이 환경변수가 필요 없습니다.
+- `diagnose_windows_os`/`diagnose_linux_os`를 `source="direct"`(Azure Monitor 없이 WinRM/SSH로
+  직접 접속)로 호출하려면, 마찬가지로 컨테이너에 `WINDOWS_DIAGNOSE_WINRM_PASSWORD`/
+  `LINUX_DIAGNOSE_SSH_PASSWORD` 환경변수(또는 Linux는 마운트된 SSH 키)가 미리 준비돼
+  있어야 하며, 비밀번호는 MCP 도구 인자로 전달되지 않습니다. `source="azure-monitor"`
+  (기본값)를 쓰면 이 자격 증명이 필요 없습니다.
+- `diagnose_windows_upgrade`/`diagnose_linux_upgrade`는 azure-monitor 모드가 없고 **항상 직접
+  접속**하므로, 마찬가지로 컨테이너에 `WINDOWS_DIAGNOSE_WINRM_PASSWORD`/`LINUX_DIAGNOSE_SSH_PASSWORD`
+  환경변수(또는 Linux는 마운트된 SSH 키)가 미리 준비돼 있어야 합니다(`windows_diagnose`/
+  `linux_diagnose`의 direct 모드와 동일한 자격 증명을 재사용).
 
 ### 컨테이너 빌드 (선택)
 ```
