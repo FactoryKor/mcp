@@ -1,4 +1,5 @@
 import os, json, subprocess, re
+from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 
 # 각 진단 도구는 별도 리포에서 pip 패키지(git+https, 버전 태그 고정)로 설치되어
@@ -14,6 +15,8 @@ WINDOWS_TOOL = "windows-diagnose"
 LINUX_TOOL = "linux-diagnose"
 MSSQL_TOOL = "mssql-diagnose"
 MYSQL_TOOL = "mysql-diagnose"
+WINDOWS_UPGRADE_TOOL = "windows-upgrade-diagnose"
+LINUX_UPGRADE_TOOL = "linux-upgrade-diagnose"
 
 mcp = FastMCP("diag-tools", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
 
@@ -34,6 +37,17 @@ if hasattr(mcp, "custom_route"):
 RID = re.compile(r"^/subscriptions/[0-9a-fA-F-]+/.+$")
 NS  = re.compile(r"^[a-z0-9-]{1,63}$")
 CLUSTER = re.compile(r"^https://[A-Za-z0-9.-]+\.kusto\.[A-Za-z0-9.]+/?$", re.IGNORECASE)
+
+
+def _validate_iso_dt(value: str) -> str:
+    """start_time/end_time이 실제 ISO 8601 형식인지 검증(그대로 argv에 전달되므로 조기 검증)."""
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"invalid ISO 8601 datetime: {value!r}")
+    return value
+
+
 # --prometheus-aad(Entra 토큰) 유출/SSRF 방지: Azure Monitor 관리형 Prometheus 엔드포인트로만 허용
 PROM_URL = re.compile(r"^https://[A-Za-z0-9.-]+\.prometheus\.monitor\.azure\.com(/.*)?$", re.IGNORECASE)
 # Log Analytics workspace GUID / OS 호스트명(컴퓨터명) 검증 (linux/windows os 진단용)
@@ -62,10 +76,15 @@ def _run(tool: str, cmd: list, timeout: int) -> dict:
 
 @mcp.tool()
 def diagnose_postgres(host: str, user: str, dbname: str = "postgres",
-                      resource_id: str = "", hours: int = 24) -> dict:
+                      resource_id: str = "", hours: int = 24, auth_mode: str = "entra") -> dict:
     """Azure Database for PostgreSQL Flexible Server 진단(읽기 전용, 결과 JSON).
-    host: <name>.postgres.database.azure.com. user: 접속 롤(Entra 사용자/관리자) — 필수.
+    host: <name>.postgres.database.azure.com. user: 접속 롤(Entra 사용자 또는 DB 계정) — 필수.
     resource_id 미지정 시 Azure Monitor 메트릭(CPU/메모리/IOPS/연결수) 수집 생략.
+
+    auth_mode='entra'(기본): Entra ID 토큰 인증. auth_mode='password': DB 계정(네이티브 PostgreSQL
+    로그인) 인증 — 이 경우 비밀번호는 이 도구의 인자로 전달되지 않으며, MCP를 구동하는 컨테이너에
+    PGPASSWORD 환경변수가 미리 설정돼 있어야 한다(mssql/mysql의 auth_mode="sql"/"mysql"과 동일한
+    설계 — DB 접속 계정과 Azure API 호출용 시스템 계정을 분리 운영할 수 있다).
 
     [자율 발견→재호출 루프] host(FQDN, 데이터 평면)만으로는 ARM resource_id(제어 평면)를
     직접 유도할 수 없다. resource_id 없이 호출해 결과 JSON의 최상위 `needs_input`에
@@ -74,13 +93,18 @@ def diagnose_postgres(host: str, user: str, dbname: str = "postgres",
     resource_id 인자로 이 도구를 재호출하면 Azure Monitor 메트릭까지 채워진다."""
     if not host or not user:
         raise ValueError("host 와 user 는 필수입니다")
+    if auth_mode not in ("entra", "password"):
+        raise ValueError("invalid auth_mode")
     if resource_id and not RID.match(resource_id):
         raise ValueError("invalid resource_id")
     cmd = [PG_TOOL, "--host", host, "--user", user, "--dbname", dbname,
-           "--aad", "--format", "json", "--hours", str(hours)]   # --aad=Entra 토큰
+           "--format", "json", "--hours", str(hours)]
+    if auth_mode == "entra":
+        cmd += ["--aad"]  # Entra 토큰
     if resource_id:
         cmd += ["--resource-id", resource_id]
     return _run("pg_diagnose", cmd, 180)
+
 
 @mcp.tool()
 def diagnose_aks(namespace: str = "default", context: str = "", all_namespaces: bool = False,
@@ -261,54 +285,148 @@ def diagnose_mysql(host: str, user: str, database: str = "", auth_mode: str = "e
     return _run("mysql_diagnose", cmd, 180)
 
 @mcp.tool()
-def diagnose_windows_os(computer: str, workspace_id: str = "", resource_id: str = "",
-                        hours: int = 24) -> dict:
-    """Windows 서버(Azure VM/Arc) OS 진단(읽기 전용, 결과 JSON).
-    computer: Log Analytics 'Computer' 컬럼 값. workspace_id 미지정 시 CPU/메모리/디스크/
-    이벤트로그/하트비트 조회 생략. resource_id 지정 시 VM 전원 상태/크기/OS 버전(제어 평면) 포함.
-    이미 수집된 Azure Monitor Agent 원격 측정만 읽으며, 서버에 원격 명령을 내리지 않는다.
+def diagnose_windows_os(computer: str = "", workspace_id: str = "", resource_id: str = "",
+                        hours: int = 24, source: str = "azure-monitor",
+                        host: str = "", winrm_user: str = "", skip_patch_check: bool = False,
+                        start_time: str = "", end_time: str = "") -> dict:
+    """Windows 서버 OS 진단(읽기 전용, 결과 JSON) — 두 가지 수집 방식 중 선택.
 
-    [자율 발견→재호출 루프] computer(호스트명)만으로는 연결된 Log Analytics 워크스페이스나
-    VM의 ARM resource_id(제어 평면)를 직접 유도할 수 없다. workspace_id/resource_id 없이
+    source='azure-monitor'(기본): computer(Log Analytics 'Computer' 컬럼 값) + workspace_id로
+    이미 수집된 Azure Monitor Agent 원격 측정을 조회. Azure VM/Arc-enabled server 전용.
+
+    source='direct': host + winrm_user로 WinRM에 직접 접속해 실시간 수집. Azure Monitor를
+    쓰지 않는 온프레미스/AWS/GCP 등 어떤 환경에서도 동작. 비밀번호는 이 도구의 인자로 전달되지
+    않는다 — MCP를 구동하는 컨테이너에 WINDOWS_DIAGNOSE_WINRM_PASSWORD 환경변수가 미리
+    설정돼 있어야 한다.
+
+    resource_id 지정 시(두 방식 공통, Azure/Arc VM인 경우) VM 전원 상태/크기/OS 버전(제어 평면) 포함.
+
+    [자율 발견→재호출 루프] source='azure-monitor'에서 computer만으로는 연결된 Log Analytics
+    워크스페이스나 VM의 ARM resource_id를 직접 유도할 수 없다. workspace_id/resource_id 없이
     호출해 결과 JSON의 최상위 `needs_input`에 해당 parameter 항목이 있으면, 그 안의
     discovery_hint를 참고해 Resource Graph로 값을 확정한 뒤 재호출하면 해당 섹션까지 채워진다."""
-    if not COMPUTER.match(computer or ""):
-        raise ValueError("invalid computer")
-    if workspace_id and not WORKSPACE_ID.match(workspace_id):
-        raise ValueError("invalid workspace_id")
+    if source not in ("azure-monitor", "direct"):
+        raise ValueError("invalid source")
     if resource_id and not RID.match(resource_id):
         raise ValueError("invalid resource_id")
-    cmd = [WINDOWS_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
-    if workspace_id:
-        cmd += ["--workspace-id", workspace_id]
+    if source == "azure-monitor":
+        if not COMPUTER.match(computer or ""):
+            raise ValueError("invalid computer")
+        if workspace_id and not WORKSPACE_ID.match(workspace_id):
+            raise ValueError("invalid workspace_id")
+        cmd = [WINDOWS_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
+        if workspace_id:
+            cmd += ["--workspace-id", workspace_id]
+        if resource_id:
+            cmd += ["--resource-id", resource_id]
+        if start_time:
+            cmd += ["--start-time", _validate_iso_dt(start_time)]
+            if end_time:
+                cmd += ["--end-time", _validate_iso_dt(end_time)]
+        return _run("windows_diagnose", cmd, 180)
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if not winrm_user:
+        raise ValueError("winrm_user is required when source='direct'")
+    cmd = [WINDOWS_TOOL, "--source", "direct", "--host", host, "--winrm-user", winrm_user,
+          "--format", "json", "--hours", str(hours)]
     if resource_id:
         cmd += ["--resource-id", resource_id]
-    return _run("windows_diagnose", cmd, 180)
+    if skip_patch_check:
+        cmd += ["--skip-patch-check"]
+    return _run("windows_diagnose", cmd, 240)
 
 @mcp.tool()
-def diagnose_linux_os(computer: str, workspace_id: str = "", resource_id: str = "",
-                      hours: int = 24) -> dict:
-    """Linux 서버(Azure VM/Arc) OS 진단(읽기 전용, 결과 JSON).
-    computer: Log Analytics 'Computer' 컬럼 값. workspace_id 미지정 시 CPU/메모리/디스크/
-    Syslog/하트비트 조회 생략. resource_id 지정 시 VM 전원 상태/크기/OS 버전(제어 평면) 포함.
-    이미 수집된 Azure Monitor Agent 원격 측정만 읽으며, 서버에 원격 명령을 내리지 않는다.
+def diagnose_linux_os(computer: str = "", workspace_id: str = "", resource_id: str = "",
+                      hours: int = 24, source: str = "azure-monitor",
+                      host: str = "", ssh_user: str = "", skip_patch_check: bool = False,
+                      start_time: str = "", end_time: str = "") -> dict:
+    """Linux 서버 OS 진단(읽기 전용, 결과 JSON) — 두 가지 수집 방식 중 선택.
 
-    [자율 발견→재호출 루프] computer(호스트명)만으로는 연결된 Log Analytics 워크스페이스나
-    VM의 ARM resource_id(제어 평면)를 직접 유도할 수 없다. workspace_id/resource_id 없이
+    source='azure-monitor'(기본): computer(Log Analytics 'Computer' 컬럼 값) + workspace_id로
+    이미 수집된 Azure Monitor Agent 원격 측정을 조회. Azure VM/Arc-enabled server 전용.
+
+    source='direct': host + ssh_user로 SSH에 직접 접속해 실시간 수집. Azure Monitor를 쓰지
+    않는 온프레미스/AWS/GCP 등 어떤 환경에서도 동작. 비밀번호는 이 도구의 인자로 전달되지
+    않는다 — MCP를 구동하는 컨테이너에 LINUX_DIAGNOSE_SSH_PASSWORD 환경변수(또는 마운트된
+    SSH 키)가 미리 준비돼 있어야 한다.
+
+    resource_id 지정 시(두 방식 공통, Azure/Arc VM인 경우) VM 전원 상태/크기/OS 버전(제어 평면) 포함.
+
+    [자율 발견→재호출 루프] source='azure-monitor'에서 computer만으로는 연결된 Log Analytics
+    워크스페이스나 VM의 ARM resource_id를 직접 유도할 수 없다. workspace_id/resource_id 없이
     호출해 결과 JSON의 최상위 `needs_input`에 해당 parameter 항목이 있으면, 그 안의
     discovery_hint를 참고해 Resource Graph로 값을 확정한 뒤 재호출하면 해당 섹션까지 채워진다."""
-    if not COMPUTER.match(computer or ""):
-        raise ValueError("invalid computer")
-    if workspace_id and not WORKSPACE_ID.match(workspace_id):
-        raise ValueError("invalid workspace_id")
+    if source not in ("azure-monitor", "direct"):
+        raise ValueError("invalid source")
     if resource_id and not RID.match(resource_id):
         raise ValueError("invalid resource_id")
-    cmd = [LINUX_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
-    if workspace_id:
-        cmd += ["--workspace-id", workspace_id]
+    if source == "azure-monitor":
+        if not COMPUTER.match(computer or ""):
+            raise ValueError("invalid computer")
+        if workspace_id and not WORKSPACE_ID.match(workspace_id):
+            raise ValueError("invalid workspace_id")
+        cmd = [LINUX_TOOL, "--computer", computer, "--format", "json", "--hours", str(hours)]
+        if workspace_id:
+            cmd += ["--workspace-id", workspace_id]
+        if resource_id:
+            cmd += ["--resource-id", resource_id]
+        if start_time:
+            cmd += ["--start-time", _validate_iso_dt(start_time)]
+            if end_time:
+                cmd += ["--end-time", _validate_iso_dt(end_time)]
+        return _run("linux_diagnose", cmd, 180)
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if not ssh_user:
+        raise ValueError("ssh_user is required when source='direct'")
+    cmd = [LINUX_TOOL, "--source", "direct", "--host", host, "--ssh-user", ssh_user,
+          "--format", "json", "--hours", str(hours)]
     if resource_id:
         cmd += ["--resource-id", resource_id]
-    return _run("linux_diagnose", cmd, 180)
+    if skip_patch_check:
+        cmd += ["--skip-patch-check"]
+    return _run("linux_diagnose", cmd, 240)
+
+@mcp.tool()
+def diagnose_windows_upgrade(host: str, winrm_user: str, skip_patch_check: bool = False) -> dict:
+    """Windows OS/소프트웨어 업그레이드 준비도 진단(읽기 전용, 결과 JSON).
+    WinRM으로 직접 접속해 현재 시점의 설치 상태(OS 빌드, 설치 프로그램)를 스냅샷으로 진단한다 —
+    azure-monitor 모드가 없고(설치 인벤토리는 기본 Azure Monitor 텔레메트리에 없음) 온프레미스/
+    AWS/GCP/Azure 어디서나 동일하게 동작한다.
+
+    OS 수명주기(EOL), Windows 11 하드웨어 요건(TPM/Secure Boot, Windows 10 대상 시),
+    설치된 EOL/구식 소프트웨어(.NET Framework 구버전, SQL Server 2012/2014 등), 권장 소프트웨어
+    (엔드포인트 보호/관리 에이전트/PowerShell 7/백업 에이전트) 설치 여부, 보류 중인 업데이트 건수를
+    진단한다. 비밀번호는 이 도구의 인자로 전달되지 않는다 — MCP를 구동하는 컨테이너에
+    WINDOWS_DIAGNOSE_WINRM_PASSWORD 환경변수가 미리 설정돼 있어야 한다.
+    skip_patch_check=True면 대상 서버에 부하를 줄 수 있는 Windows Update 검색을 건너뛴다."""
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if not winrm_user:
+        raise ValueError("winrm_user is required")
+    cmd = [WINDOWS_UPGRADE_TOOL, "--host", host, "--winrm-user", winrm_user, "--format", "json"]
+    if skip_patch_check:
+        cmd += ["--skip-patch-check"]
+    return _run("windows_upgrade_diagnose", cmd, 240)
+
+@mcp.tool()
+def diagnose_linux_upgrade(host: str, ssh_user: str) -> dict:
+    """Linux OS/소프트웨어 업그레이드 준비도 진단(읽기 전용, 결과 JSON).
+    SSH로 직접 접속해 현재 시점의 설치 상태(배포판 버전, 설치 패키지)를 스냅샷으로 진단한다 —
+    azure-monitor 모드가 없고(설치 인벤토리는 기본 Azure Monitor 텔레메트리에 없음) 온프레미스/
+    AWS/GCP/Azure 어디서나 동일하게 동작한다.
+
+    배포판 수명주기(EOL), 설치된 EOL/구식 소프트웨어(Python 2, 구버전 PHP/MySQL/OpenSSL 등),
+    권장 소프트웨어(자동 패치/침입 차단/감사 로그/시간 동기화/Azure Arc 에이전트) 설치 여부를
+    진단한다. 비밀번호는 이 도구의 인자로 전달되지 않는다 — MCP를 구동하는 컨테이너에
+    LINUX_DIAGNOSE_SSH_PASSWORD 환경변수(또는 마운트된 SSH 키)가 미리 준비돼 있어야 한다."""
+    if not COMPUTER.match(host or ""):
+        raise ValueError("invalid host")
+    if not ssh_user:
+        raise ValueError("ssh_user is required")
+    cmd = [LINUX_UPGRADE_TOOL, "--host", host, "--ssh-user", ssh_user, "--format", "json"]
+    return _run("linux_upgrade_diagnose", cmd, 240)
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")   # 엔드포인트: /mcp
