@@ -12,3 +12,7 @@ adx-diagnose @ git+https://github.com/FactoryKor/adx.git@v1.0.0
 eh-diagnose @ git+https://github.com/FactoryKor/eh.git@v1.0.0
 agw-diagnose @ git+https://github.com/FactoryKor/agw.git@v1.0.0
 svcmap-diagnose @ git+https://github.com/FactoryKor/svcmap.git@v1.0.0
+windows-diagnose @ git+https://github.com/FactoryKor/windows.git@v1.0.0
+linux-diagnose @ git+https://github.com/FactoryKor/linux.git@v1.0.0
+mssql-diagnose @ git+https://github.com/FactoryKor/mssql.git@v1.0.0
+mysql-diagnose @ git+https://github.com/FactoryKor/mysql.git@v1.0.0
