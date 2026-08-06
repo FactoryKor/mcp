@@ -51,8 +51,6 @@ Install File/            # = BASE (mcp_server.py 기준 상위 폴더)
 | `diagnose_linux_os` | Linux 서버(Azure VM/Arc 또는 온프레미스/AWS/GCP) | `source`(azure-monitor\|direct), `computer`/`workspace_id` 또는 `host`/`ssh_user`, `resource_id`, `hours`, `start_time`/`end_time` | `linux_diagnose.py --format json` |
 | `diagnose_mssql` | SQL Server(온프레미스/IaaS/Azure SQL DB/MI) | `host`, `user`, `database`, `auth_mode`, `resource_id`, `region`, `hours` | `mssql_diagnose.py --format json` |
 | `diagnose_mysql` | MySQL(온프레미스/IaaS/Azure DB for MySQL) | `host`, `user`, `database`, `auth_mode`, `resource_id`, `region`, `hours` | `mysql_diagnose.py --format json` |
-| `diagnose_windows_upgrade` | Windows OS/소프트웨어 업그레이드 준비도(온프레미스/IaaS 불문, WinRM 직접 접속) | `host`, `winrm_user`, `skip_patch_check` | `windows_upgrade_diagnose.py --format json` |
-| `diagnose_linux_upgrade` | Linux OS/소프트웨어 업그레이드 준비도(온프레미스/IaaS 불문, SSH 직접 접속) | `host`, `ssh_user` | `linux_upgrade_diagnose.py --format json` |
 
 각 도구는 입력을 검증(`RID`/`NS`/`CLUSTER`/`WORKSPACE_ID`/`COMPUTER` 정규식)한 뒤 `subprocess.run([... , "--format", "json"])`으로
 진단기를 실행하고 `json.loads(stdout)`을 반환합니다. 인자는 셸 문자열이 아닌 **argv 리스트**로 전달합니다.
@@ -65,6 +63,24 @@ Install File/            # = BASE (mcp_server.py 기준 상위 폴더)
 - `eh`: 자체 스키마(`checks[]` = category / severity / title / detail / **recommendation** / evidence) + 최상위 `worst_severity` / **`health_score`** / **`severity_counts`** / **`summary`**(자연어 한 줄) / **`recommended_actions[]`**(우선순위 조치: severity / category / title / action)
 
 ---
+
+## ⚙️ Prerequisites
+
+**MCP 서버 / Azure SRE Agent로 사용할 때**(즉 이미 ACA에 배포된 상태)
+- 사용자가 별도로 할 것이 없습니다 — SRE Agent에서 MCP 커넥터(`mcpEndpoint`)를 등록해두면 끝입니다. 서버는 이미 Azure Container Apps에 상주하며, 6개 진단 도구가 모두 이미지에 설치돼 있고 Managed Identity로 Azure 자격증명까지 구성되어 있습니다.
+
+**단독(Standalone)으로 이 MCP 서버 자체를 로컬에서 직접 돌려볼 때**(개발/테스트 목적)
+- Python 3.10+
+- 6개 진단 도구의 `requirements.txt`를 동일한 Python 환경에 모두 설치
+- Azure 자격 증명(`az login` 또는 환경변수)이 로컬에 미리 준비돼 있어야 함
+
+---
+
+## ⚙️ Installation & Execution
+
+**MCP 서버 / Azure SRE Agent로 사용할 때**는 설치가 필요 없습니다 — `infra/main.bicep`으로 배포된 ACA가 이미 실행 중입니다(자세한 내용은 아래 "배포" 절 참고).
+
+**단독(Standalone)으로 로컬에서 MCP 서버를 직접 실행할 때**:
 
 ## 실행
 
@@ -96,10 +112,7 @@ python mcp_server.py
   `LINUX_DIAGNOSE_SSH_PASSWORD` 환경변수(또는 Linux는 마운트된 SSH 키)가 미리 준비돼
   있어야 하며, 비밀번호는 MCP 도구 인자로 전달되지 않습니다. `source="azure-monitor"`
   (기본값)를 쓰면 이 자격 증명이 필요 없습니다.
-- `diagnose_windows_upgrade`/`diagnose_linux_upgrade`는 azure-monitor 모드가 없고 **항상 직접
-  접속**하므로, 마찬가지로 컨테이너에 `WINDOWS_DIAGNOSE_WINRM_PASSWORD`/`LINUX_DIAGNOSE_SSH_PASSWORD`
-  환경변수(또는 Linux는 마운트된 SSH 키)가 미리 준비돼 있어야 합니다(`windows_diagnose`/
-  `linux_diagnose`의 direct 모드와 동일한 자격 증명을 재사용).
+
 
 ### 컨테이너 빌드 (선택)
 ```
@@ -310,3 +323,9 @@ python ..\<name>\<name>_diagnose.py --demo --format json | python -m json.tool
 | `ModuleNotFoundError` | MCP 실행 Python 환경에 해당 도구 `requirements.txt` 미설치 |
 | 인증 실패 | MCP 구동 환경의 Azure 자격(MI/`az login`/env) 및 RBAC 확인 |
 | `subprocess ... timeout` | 대상 규모가 크면 wrapper의 `timeout` 상향 |
+
+---
+
+## 라이선스
+
+이 프로젝트는 [MIT License](LICENSE)를 따릅니다.
