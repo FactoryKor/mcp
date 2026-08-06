@@ -16,5 +16,3 @@ windows-diagnose @ git+https://github.com/FactoryKor/windows.git@v1.0.0
 linux-diagnose @ git+https://github.com/FactoryKor/linux.git@v1.0.0
 mssql-diagnose @ git+https://github.com/FactoryKor/mssql.git@v1.0.0
 mysql-diagnose @ git+https://github.com/FactoryKor/mysql.git@v1.0.0
-windows-upgrade-diagnose @ git+https://github.com/FactoryKor/windows-upgrade.git@v1.0.0
-linux-upgrade-diagnose @ git+https://github.com/FactoryKor/linux-upgrade.git@v1.0.0
