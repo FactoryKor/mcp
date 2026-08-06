@@ -15,8 +15,6 @@ WINDOWS_TOOL = "windows-diagnose"
 LINUX_TOOL = "linux-diagnose"
 MSSQL_TOOL = "mssql-diagnose"
 MYSQL_TOOL = "mysql-diagnose"
-WINDOWS_UPGRADE_TOOL = "windows-upgrade-diagnose"
-LINUX_UPGRADE_TOOL = "linux-upgrade-diagnose"
 
 mcp = FastMCP("diag-tools", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
 
@@ -288,6 +286,7 @@ def diagnose_mysql(host: str, user: str, database: str = "", auth_mode: str = "e
 def diagnose_windows_os(computer: str = "", workspace_id: str = "", resource_id: str = "",
                         hours: int = 24, source: str = "azure-monitor",
                         host: str = "", winrm_user: str = "", skip_patch_check: bool = False,
+                        skip_upgrade_check: bool = False,
                         start_time: str = "", end_time: str = "") -> dict:
     """Windows 서버 OS 진단(읽기 전용, 결과 JSON) — 두 가지 수집 방식 중 선택.
 
@@ -334,12 +333,15 @@ def diagnose_windows_os(computer: str = "", workspace_id: str = "", resource_id:
         cmd += ["--resource-id", resource_id]
     if skip_patch_check:
         cmd += ["--skip-patch-check"]
+    if skip_upgrade_check:
+        cmd += ["--skip-upgrade-check"]
     return _run("windows_diagnose", cmd, 240)
 
 @mcp.tool()
 def diagnose_linux_os(computer: str = "", workspace_id: str = "", resource_id: str = "",
                       hours: int = 24, source: str = "azure-monitor",
                       host: str = "", ssh_user: str = "", skip_patch_check: bool = False,
+                      skip_upgrade_check: bool = False,
                       start_time: str = "", end_time: str = "") -> dict:
     """Linux 서버 OS 진단(읽기 전용, 결과 JSON) — 두 가지 수집 방식 중 선택.
 
@@ -386,47 +388,9 @@ def diagnose_linux_os(computer: str = "", workspace_id: str = "", resource_id: s
         cmd += ["--resource-id", resource_id]
     if skip_patch_check:
         cmd += ["--skip-patch-check"]
+    if skip_upgrade_check:
+        cmd += ["--skip-upgrade-check"]
     return _run("linux_diagnose", cmd, 240)
-
-@mcp.tool()
-def diagnose_windows_upgrade(host: str, winrm_user: str, skip_patch_check: bool = False) -> dict:
-    """Windows OS/소프트웨어 업그레이드 준비도 진단(읽기 전용, 결과 JSON).
-    WinRM으로 직접 접속해 현재 시점의 설치 상태(OS 빌드, 설치 프로그램)를 스냅샷으로 진단한다 —
-    azure-monitor 모드가 없고(설치 인벤토리는 기본 Azure Monitor 텔레메트리에 없음) 온프레미스/
-    AWS/GCP/Azure 어디서나 동일하게 동작한다.
-
-    OS 수명주기(EOL), Windows 11 하드웨어 요건(TPM/Secure Boot, Windows 10 대상 시),
-    설치된 EOL/구식 소프트웨어(.NET Framework 구버전, SQL Server 2012/2014 등), 권장 소프트웨어
-    (엔드포인트 보호/관리 에이전트/PowerShell 7/백업 에이전트) 설치 여부, 보류 중인 업데이트 건수를
-    진단한다. 비밀번호는 이 도구의 인자로 전달되지 않는다 — MCP를 구동하는 컨테이너에
-    WINDOWS_DIAGNOSE_WINRM_PASSWORD 환경변수가 미리 설정돼 있어야 한다.
-    skip_patch_check=True면 대상 서버에 부하를 줄 수 있는 Windows Update 검색을 건너뛴다."""
-    if not COMPUTER.match(host or ""):
-        raise ValueError("invalid host")
-    if not winrm_user:
-        raise ValueError("winrm_user is required")
-    cmd = [WINDOWS_UPGRADE_TOOL, "--host", host, "--winrm-user", winrm_user, "--format", "json"]
-    if skip_patch_check:
-        cmd += ["--skip-patch-check"]
-    return _run("windows_upgrade_diagnose", cmd, 240)
-
-@mcp.tool()
-def diagnose_linux_upgrade(host: str, ssh_user: str) -> dict:
-    """Linux OS/소프트웨어 업그레이드 준비도 진단(읽기 전용, 결과 JSON).
-    SSH로 직접 접속해 현재 시점의 설치 상태(배포판 버전, 설치 패키지)를 스냅샷으로 진단한다 —
-    azure-monitor 모드가 없고(설치 인벤토리는 기본 Azure Monitor 텔레메트리에 없음) 온프레미스/
-    AWS/GCP/Azure 어디서나 동일하게 동작한다.
-
-    배포판 수명주기(EOL), 설치된 EOL/구식 소프트웨어(Python 2, 구버전 PHP/MySQL/OpenSSL 등),
-    권장 소프트웨어(자동 패치/침입 차단/감사 로그/시간 동기화/Azure Arc 에이전트) 설치 여부를
-    진단한다. 비밀번호는 이 도구의 인자로 전달되지 않는다 — MCP를 구동하는 컨테이너에
-    LINUX_DIAGNOSE_SSH_PASSWORD 환경변수(또는 마운트된 SSH 키)가 미리 준비돼 있어야 한다."""
-    if not COMPUTER.match(host or ""):
-        raise ValueError("invalid host")
-    if not ssh_user:
-        raise ValueError("ssh_user is required")
-    cmd = [LINUX_UPGRADE_TOOL, "--host", host, "--ssh-user", ssh_user, "--format", "json"]
-    return _run("linux_upgrade_diagnose", cmd, 240)
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")   # 엔드포인트: /mcp
